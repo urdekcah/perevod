@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "perevod"
+version = "0.1.0"
+description = "Offline Russian to Korean translation for Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE.md"]
+dependencies = [
+    "mlx>=0.32.2",
+    "mlx-lm>=0.31.3",
+    "transformers>=5.0.0",
+    "click",
+]
+
+[project.scripts]
+perevod = "perevod.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["perevod"]
+
+# data/ carries a different license and must never ship in a distributable.
+# Leading slashes are load-bearing: unanchored, "README.md" also matches data/README.md.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/perevod",
+    "/tests",
+    "/LICENSE",
+    "/NOTICE.md",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.perevod]
+scale-tier = "T2"
