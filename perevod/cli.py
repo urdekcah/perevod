@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
 
+from perevod.dataset import DEFAULT_SPLIT_DIR, DatasetError, validate_split_dir
 from perevod.prepare import (
     DEFAULT_MAX_LENGTH_RATIO,
     DEFAULT_OUTPUT_DIR,
@@ -17,7 +19,19 @@ from perevod.prepare import (
     prepare_splits,
     render_report,
 )
+from perevod.training import (
+    DEFAULT_RUN_NAME,
+    TRAINER_FLAGS,
+    TrainingConfig,
+    TrainingError,
+    train_adapter,
+)
 from perevod.translator import DEFAULT_MAX_TOKENS, Translator
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+F = TypeVar("F", bound="Callable[..., None]")
 
 
 @click.group()
@@ -127,3 +141,70 @@ def prepare_data(  # noqa: PLR0913 -- one parameter per click option
     for note in result.skipped + result.duplicates + result.conflicts:
         click.echo(note, err=True)
     click.echo(render_report(result))
+
+
+def _trainer_option(name: str, **kwargs: Any) -> Callable[[F], F]:  # noqa: ANN401
+    """A CLI option named after the trainer flag it feeds, so the two cannot drift apart."""
+    return click.option(TRAINER_FLAGS[name].flag, name, **kwargs)
+
+
+@main.command("validate-data")
+@_trainer_option(
+    "data_dir",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_SPLIT_DIR,
+    show_default=True,
+    help="Directory holding the splits.",
+)
+def validate_data(data_dir: Path) -> None:
+    """Check the splits the trainer would read, without starting a run."""
+    try:
+        report = validate_split_dir(data_dir)
+    except DatasetError as error:
+        raise click.ClickException(str(error)) from error
+
+    for notice in report.notices:
+        click.echo(notice, err=True)
+    for name, rows in report.rows.items():
+        click.echo(f"{name}: {rows} row(s)")
+
+
+@main.command()
+@_trainer_option(
+    "data_dir",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_SPLIT_DIR,
+    show_default=True,
+    help="Directory holding the splits.",
+)
+@_trainer_option("model_id", default=None, help="Model repository id to fine-tune.")
+@_trainer_option(
+    "adapter_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where the adapter lands; defaults to data/adapters/<run name>.",
+)
+@_trainer_option("iterations", type=int, default=None, help="Training steps.")
+@_trainer_option("batch_size", type=int, default=None, help="Minibatch size.")
+@_trainer_option("learning_rate", type=float, default=None, help="Adam learning rate.")
+@_trainer_option("num_layers", type=int, default=None, help="Layers to fine-tune; -1 for all.")
+@_trainer_option("max_seq_length", type=int, default=None, help="Longest sequence trained on.")
+@_trainer_option("seed", type=int, default=None, help="Trainer PRNG seed.")
+@_trainer_option("mask_prompt", is_flag=True, help="Fit only the Korean side, not the prompt.")
+@_trainer_option("grad_checkpoint", is_flag=True, help="Trade speed for memory.")
+@click.option("--run-name", default=DEFAULT_RUN_NAME, show_default=True, help="Names the output.")
+@click.option("--overwrite", is_flag=True, help="Replace an adapter already in the output path.")
+def train(**options: object) -> None:
+    """Fine-tune a LoRA adapter on the splits under DATA.
+
+    Every unset option leaves the trainer's own default in force.
+    """
+    config = TrainingConfig(**options)  # type: ignore[arg-type]
+    try:
+        adapter_path, report = train_adapter(config)
+    except (DatasetError, TrainingError) as error:
+        raise click.ClickException(str(error)) from error
+
+    for notice in report.notices:
+        click.echo(notice, err=True)
+    click.echo(f"Adapter written to {adapter_path}")

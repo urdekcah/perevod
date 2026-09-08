@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from perevod.translator import build_messages
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # The names mlx_lm.lora looks up.
 TRAIN_FILENAME = "train.jsonl"
@@ -16,13 +21,27 @@ VALID_FILENAME = "valid.jsonl"
 TEST_FILENAME = "test.jsonl"
 MANIFEST_FILENAME = "manifest.json"
 
+DEFAULT_SPLIT_DIR = Path("data/splits")
+
 MESSAGES_KEY = "messages"
 ROLE_KEY = "role"
 CONTENT_KEY = "content"
 ASSISTANT_ROLE = "assistant"
 
+# The three row shapes mlx_lm.lora reads, and the roles it accepts in a chat row.
+CHAT_SCHEMA = "chat"
+COMPLETIONS_SCHEMA = "completions"
+TEXT_SCHEMA = "text"
+CHAT_ROLES = ("system", "user", ASSISTANT_ROLE)
+
+PROMPT_KEY = "prompt"
+COMPLETION_KEY = "completion"
+TEXT_KEY = "text"
+
 # Stands in for the source while the scaffolding around it is measured.
 SHAPE_SENTINEL = "«PEREVOD-SOURCE»"
+
+_REGENERATE_HINT = "regenerate the splits with `perevod prepare-data`"
 
 
 class DatasetError(Exception):
@@ -31,6 +50,23 @@ class DatasetError(Exception):
 
 class RecordShapeError(DatasetError):
     """A record disagrees with the shape the shipped prompt builder produces."""
+
+
+class SchemaError(DatasetError):
+    """A line is not one of the row shapes the trainer reads."""
+
+
+class SplitLayoutError(DatasetError):
+    """The data directory does not hold the files the trainer requires."""
+
+
+@dataclass(frozen=True)
+class SplitReport:
+    """What a data directory holds, once every present file has been accepted."""
+
+    data_dir: Path
+    rows: Mapping[str, int]
+    notices: tuple[str, ...]
 
 
 def _reference_messages() -> list[dict[str, str]]:
@@ -122,3 +158,149 @@ def prompt_shape_fingerprint() -> str:
         _reference_messages(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _check_chat_messages(messages: object) -> None:
+    if not isinstance(messages, list) or not messages:
+        msg = f"{MESSAGES_KEY!r} is not a non-empty list"
+        raise SchemaError(msg)
+
+    for position, message in enumerate(messages):
+        if not isinstance(message, dict) or set(message) != {ROLE_KEY, CONTENT_KEY}:
+            msg = f"message {position} does not carry exactly {ROLE_KEY!r} and {CONTENT_KEY!r}"
+            raise SchemaError(msg)
+        if not all(isinstance(field, str) for field in message.values()):
+            msg = f"message {position} has a non-string {ROLE_KEY} or {CONTENT_KEY}"
+            raise SchemaError(msg)
+        if message[ROLE_KEY] not in CHAT_ROLES:
+            msg = f"message {position} uses role {message[ROLE_KEY]!r}, outside {CHAT_ROLES}"
+            raise SchemaError(msg)
+
+
+def classify_record(value: object) -> str:
+    """Which of the trainer's three schemas one decoded line matches."""
+    if not isinstance(value, dict):
+        msg = f"expected a JSON object, found {type(value).__name__}"
+        raise SchemaError(msg)
+
+    if MESSAGES_KEY in value:
+        _check_chat_messages(value[MESSAGES_KEY])
+        return CHAT_SCHEMA
+    if isinstance(value.get(PROMPT_KEY), str) and isinstance(value.get(COMPLETION_KEY), str):
+        return COMPLETIONS_SCHEMA
+    if isinstance(value.get(TEXT_KEY), str):
+        return TEXT_SCHEMA
+
+    msg = f"object matches none of the {CHAT_SCHEMA}, {COMPLETIONS_SCHEMA} or {TEXT_SCHEMA} schemas"
+    raise SchemaError(msg)
+
+
+def _at(path: Path, line: int, detail: str) -> str:
+    return f"{path}:{line}: {detail}"
+
+
+def _load(path: Path) -> list[tuple[int, object]]:
+    if not path.is_file():
+        msg = f"{path}: no such file"
+        raise SchemaError(msg)
+
+    decoded: list[tuple[int, object]] = []
+    # Blank lines are the trailing newline every editor writes, not a malformed record.
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            decoded.append((number, json.loads(line)))
+        except json.JSONDecodeError as error:
+            raise SchemaError(_at(path, number, f"not valid JSON: {error.msg}")) from error
+
+    if not decoded:
+        msg = f"{path}: holds no records"
+        raise SchemaError(msg)
+    return decoded
+
+
+def _schema_of(path: Path, decoded: list[tuple[int, object]]) -> str:
+    seen: dict[str, int] = {}
+    for number, value in decoded:
+        try:
+            schema = classify_record(value)
+        except SchemaError as error:
+            raise SchemaError(_at(path, number, str(error))) from error
+        seen.setdefault(schema, number)
+
+    if len(seen) > 1:
+        (first, first_line), (second, second_line) = sorted(seen.items(), key=lambda i: i[1])[:2]
+        msg = _at(path, second_line, f"{second} row in a {first} file (line {first_line})")
+        raise SchemaError(msg)
+    return next(iter(seen))
+
+
+def validate_schema(path: Path) -> str:
+    """The single schema every record in `path` shares.
+
+    Raises:
+        SchemaError: The file is unreadable, empty, or not one uniform schema.
+    """
+    return _schema_of(path, _load(path))
+
+
+def validate_training_file(path: Path) -> int:
+    """Accepted record count, once every row round-trips through the shipped prompt shape.
+
+    Raises:
+        SchemaError: Not a `chat` file this project would train on.
+        RecordShapeError: A row was built against a different prompt shape.
+    """
+    decoded = _load(path)
+    schema = _schema_of(path, decoded)
+    if schema != CHAT_SCHEMA:
+        msg = (
+            f"{path}: valid {schema} data, but this project trains on {CHAT_SCHEMA} rows carrying "
+            f"its own prompt shape; {_REGENERATE_HINT}"
+        )
+        raise SchemaError(msg)
+
+    for number, value in decoded:
+        try:
+            parse_training_record(value)
+        except RecordShapeError as error:
+            detail = (
+                f"{error}. Training on this would fit the adapter to a prompt the model "
+                f"never sees at translation time; {_REGENERATE_HINT}"
+            )
+            raise RecordShapeError(_at(path, number, detail)) from error
+    return len(decoded)
+
+
+def validate_split_dir(data_dir: Path | None = None) -> SplitReport:
+    """Check every split file before a run that costs hours is worth starting.
+
+    Raises:
+        SplitLayoutError: The required `train.jsonl` is missing.
+        DatasetError: A present file is unreadable or built against another prompt shape.
+    """
+    directory = (DEFAULT_SPLIT_DIR if data_dir is None else data_dir).expanduser()
+
+    train = directory / TRAIN_FILENAME
+    if not train.is_file():
+        msg = (
+            f"{train}: required split is missing. {VALID_FILENAME} and {TEST_FILENAME} are "
+            f"optional; see data/README.md for how to produce all three"
+        )
+        raise SplitLayoutError(msg)
+
+    rows = {TRAIN_FILENAME: validate_training_file(train)}
+    notices: list[str] = []
+
+    valid = directory / VALID_FILENAME
+    if valid.is_file():
+        rows[VALID_FILENAME] = validate_training_file(valid)
+    else:
+        notices.append(f"{valid} is absent; training will report no validation loss.")
+
+    test = directory / TEST_FILENAME
+    if test.is_file():
+        rows[TEST_FILENAME] = validate_training_file(test)
+
+    return SplitReport(data_dir=directory, rows=rows, notices=tuple(notices))
