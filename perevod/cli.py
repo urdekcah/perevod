@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """Command-line entry point. Translation logic lives in the library, not here."""
 
 from __future__ import annotations
@@ -41,7 +43,8 @@ def translate(text: str | None, model: str | None, max_tokens: int) -> None:
     source = sys.stdin.read() if text is None or text == "-" else text
     source = source.strip()
     if not source:
-        raise click.UsageError("No source text. Pass it as an argument or on standard input.")
+        msg = "No source text. Pass it as an argument or on standard input."
+        raise click.UsageError(msg)
 
     click.echo(Translator(model).translate(source, max_tokens=max_tokens))
 
@@ -56,8 +59,20 @@ def translate(text: str | None, model: str | None, max_tokens: int) -> None:
     help="Directory the splits and the manifest are written to.",
 )
 @click.option("--seed", type=int, default=0, show_default=True, help="Fixes the split assignment.")
-@click.option("--valid-fraction", type=float, default=0.1, show_default=True, help="Share held out for validation.")
-@click.option("--test-fraction", type=float, default=0.1, show_default=True, help="Share held out for testing.")
+@click.option(
+    "--valid-fraction",
+    type=float,
+    default=0.1,
+    show_default=True,
+    help="Share held out for validation.",
+)
+@click.option(
+    "--test-fraction",
+    type=float,
+    default=0.1,
+    show_default=True,
+    help="Share held out for testing.",
+)
 @click.option(
     "--max-length-ratio",
     type=float,
@@ -65,11 +80,21 @@ def translate(text: str | None, model: str | None, max_tokens: int) -> None:
     show_default=True,
     help="Misalignment bound on the two sides' character counts; 0 disables it.",
 )
-@click.option("--max-chars", type=int, default=None, help="Reject a pair whose longer side exceeds this many characters.")
-@click.option("--allow-source-conflicts", is_flag=True, help="Keep one source carrying two different translations.")
+@click.option(
+    "--max-chars",
+    type=int,
+    default=None,
+    help="Reject a pair whose longer side exceeds this many characters.",
+)
+@click.option(
+    "--allow-source-conflicts",
+    is_flag=True,
+    help="Keep one source carrying two different translations.",
+)
 @click.option("--overwrite", is_flag=True, help="Replace the split files this command owns.")
-def prepare_data(
+def prepare_data(  # noqa: PLR0913 -- one parameter per click option
     inputs: tuple[Path, ...],
+    *,
     output_dir: Path,
     seed: int,
     valid_fraction: float,

@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """Turn hand-authored pair files into reproducible, leakage-free training splits."""
 
 from __future__ import annotations
@@ -153,7 +155,8 @@ def _read_pairs(
         found = stripped.count(PAIR_DELIMITER)
         if found != 1:
             problems.append(
-                f"{path}:{number}: expected exactly one {PAIR_DELIMITER!r}, found {found}: {stripped}"
+                f"{path}:{number}: expected exactly one {PAIR_DELIMITER!r}, "
+                f"found {found}: {stripped}"
             )
             continue
 
@@ -170,9 +173,7 @@ def _read_pairs(
         if _length_problem(located, source, target, config, problems):
             continue
 
-        pairs.append(
-            _Pair(source, target, _key(source), _key(target), str(path), number)
-        )
+        pairs.append(_Pair(source, target, _key(source), _key(target), str(path), number))
 
     return pairs, len(lines), text
 
@@ -249,19 +250,26 @@ def _assign_splits(pairs: list[_Pair], config: PrepareConfig) -> dict[str, list[
         groups.setdefault(pair.source_key, []).append(pair)
 
     total = len(pairs)
-    wanted = total * config.valid_fraction, total * config.test_fraction
-    plan = [[TRAIN_FILENAME, total - math.floor(wanted[0]) - math.floor(wanted[1])]]
-    if config.valid_fraction > 0:
-        plan.append([VALID_FILENAME, math.floor(wanted[0])])
-    if config.test_fraction > 0:
-        plan.append([TEST_FILENAME, math.floor(wanted[1])])
-
-    for (name, size), fraction in zip(plan[1:], (config.valid_fraction, config.test_fraction)):
+    held_out = (
+        (VALID_FILENAME, config.valid_fraction),
+        (TEST_FILENAME, config.test_fraction),
+    )
+    # Each split is sized against its own fraction; a positional pairing names the
+    # wrong split and divides by zero when its neighbour is disabled.
+    plan: list[tuple[str, int]] = [
+        (TRAIN_FILENAME, total - sum(math.floor(total * share) for _, share in held_out))
+    ]
+    for name, fraction in held_out:
+        if fraction <= 0:
+            continue
+        size = math.floor(total * fraction)
         if size == 0:
-            raise PrepareError(
+            msg = (
                 f"{name} was requested at {fraction} but {total} pairs yield zero rows; "
                 f"at least {math.ceil(1 / fraction)} pairs are needed"
             )
+            raise PrepareError(msg)
+        plan.append((name, size))
 
     buckets: dict[str, list[_Pair]] = {name: [] for name, _ in plan}
     index = 0
@@ -304,7 +312,8 @@ def _resolve_output_dir(output_dir: Path, root: Path) -> Path:
     for name in PROTECTED_SUBDIRS:
         guarded = (root / name).resolve()
         if resolved == guarded or guarded in resolved.parents:
-            raise OutputPathError(f"{resolved} lies inside {guarded}, which is never written to")
+            msg = f"{resolved} lies inside {guarded}, which is never written to"
+            raise OutputPathError(msg)
     return resolved
 
 
@@ -346,9 +355,11 @@ def prepare_splits(config: PrepareConfig) -> PrepareResult:
         PrepareError: Fractions out of range, or a requested split holds no rows.
     """
     if not 0.0 <= config.valid_fraction < 1.0 or not 0.0 <= config.test_fraction < 1.0:
-        raise PrepareError("valid_fraction and test_fraction must each lie in [0.0, 1.0)")
+        msg = "valid_fraction and test_fraction must each lie in [0.0, 1.0)"
+        raise PrepareError(msg)
     if config.valid_fraction + config.test_fraction >= 1.0:
-        raise PrepareError("valid_fraction and test_fraction must sum to less than 1.0")
+        msg = "valid_fraction and test_fraction must sum to less than 1.0"
+        raise PrepareError(msg)
 
     root = Path.cwd().resolve()
     resolved_output = _resolve_output_dir(config.output_dir, root)
@@ -411,9 +422,7 @@ def prepare_splits(config: PrepareConfig) -> PrepareResult:
             for name, body in rendered.items()
         ],
     }
-    rendered[MANIFEST_FILENAME] = (
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    )
+    rendered[MANIFEST_FILENAME] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
 
     resolved_output.mkdir(parents=True, exist_ok=True)
     for name, body in rendered.items():

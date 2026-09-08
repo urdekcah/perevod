@@ -221,6 +221,8 @@ __marimo__/
 .claude/
 CLAUDE.md
 
+.DS_Store
+
 data/*
 !data/README.md
 private/

@@ -20,6 +20,16 @@ dependencies = [
 [project.scripts]
 perevod = "perevod.cli:main"
 
+# PEP 735. Not installed by consumers.
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["perevod"]
 
@@ -35,5 +45,112 @@ include = [
     "/pyproject.toml",
 ]
 
+[tool.uv]
+required-version = ">=0.12"
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
 [tool.perevod]
 scale-tier = "T2"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["perevod", "tests"]
+extend-exclude = ["data"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint]
+select = ["ALL"]
+
+ignore = [
+    "COM812", # missing-trailing-comma
+    "ISC001", # single-line-implicit-string-concatenation
+    "D203",   # incorrect-blank-line-before-class
+    "D213",   # multi-line-summary-second-line
+    "D107",   # undocumented-public-init
+    "TRY003", # raise-vanilla-args
+]
+
+# Cyrillic here is the payload, not a homoglyph typo for the Latin letter it resembles.
+allowed-confusables = [
+    "А", "В", "Е", "З", "И", "К", "М", "Н", "О", "Р", "С", "Т", "У", "Х",
+    "а", "б", "в", "г", "д", "е", "и", "к", "м", "н", "о", "р", "с", "т", "у", "х", "ч",
+]
+
+# An unused import is an error, not a suggestion; nothing is silently deleted.
+unfixable = ["F401", "F841", "ERA001"]
+
+flake8-copyright.notice-rgx = '(?i)©\s+\d{4}(?:\s*[-–]\s*\d{4})?\s+urdekcah'
+flake8-quotes.docstring-quotes = "double"
+pydocstyle.convention = "google"
+isort.known-first-party = ["perevod"]
+mccabe.max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# The suite runs under `python -m unittest`, where a bare `assert` reports no values.
+"tests/**" = [
+    "PT009",  # pytest-unittest-assertion
+    "PT027",  # pytest-unittest-raises-assertion
+    # Every test name is already a full sentence.
+    "D102",   # undocumented-public-method
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["perevod", "tests"]
+strict = true
+warn_unreachable = true
+extra_checks = true
+enable_error_code = [
+    "ignore-without-code",
+    "possibly-undefined",
+    "redundant-expr",
+    "redundant-self",
+    "truthy-bool",
+    "truthy-iterable",
+    "unused-awaitable",
+]
+pretty = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# Neither ships type information, and neither is importable off Apple Silicon.
+module = ["mlx.*", "mlx_lm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# -ra names the reason for every non-passing test; the rest fail the run on anything sloppy.
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+]
+filterwarnings = ["error"]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["perevod"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

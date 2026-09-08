@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """The training-record shape and the split file names, shared with the trainer."""
 
 from __future__ import annotations
@@ -40,9 +42,11 @@ def _affixes() -> tuple[int, str, str]:
     messages = _reference_messages()
     carriers = [i for i, message in enumerate(messages) if SHAPE_SENTINEL in message[CONTENT_KEY]]
     if len(carriers) != 1:
-        raise RecordShapeError(
-            f"the prompt builder put the source into {len(carriers)} messages; exactly one is required"
+        msg = (
+            f"the prompt builder put the source into {len(carriers)} messages; "
+            "exactly one is required"
         )
+        raise RecordShapeError(msg)
 
     index = carriers[0]
     prefix, suffix = messages[index][CONTENT_KEY].split(SHAPE_SENTINEL)
@@ -56,14 +60,15 @@ def build_training_record(source: str, target: str) -> dict[str, Any]:
         RecordShapeError: `source` holds the sentinel, so it could not be parsed back.
     """
     if SHAPE_SENTINEL in source:
-        raise RecordShapeError(f"source text contains the reserved sentinel {SHAPE_SENTINEL!r}")
+        msg = f"source text contains the reserved sentinel {SHAPE_SENTINEL!r}"
+        raise RecordShapeError(msg)
 
     messages = build_messages(source)
     messages.append({ROLE_KEY: ASSISTANT_ROLE, CONTENT_KEY: target})
     return {MESSAGES_KEY: messages}
 
 
-def parse_training_record(record: Any) -> tuple[str, str]:
+def parse_training_record(record: object) -> tuple[str, str]:
     """The exact inverse of `build_training_record`.
 
     Raises:
@@ -73,38 +78,42 @@ def parse_training_record(record: Any) -> tuple[str, str]:
     reference = _reference_messages()
 
     if not isinstance(record, dict) or not isinstance(record.get(MESSAGES_KEY), list):
-        raise RecordShapeError(f"record is not an object carrying a {MESSAGES_KEY!r} list")
+        msg = f"record is not an object carrying a {MESSAGES_KEY!r} list"
+        raise RecordShapeError(msg)
 
     messages = record[MESSAGES_KEY]
     if len(messages) != len(reference) + 1:
-        raise RecordShapeError(
-            f"expected {len(reference) + 1} messages, found {len(messages)}"
-        )
+        msg = f"expected {len(reference) + 1} messages, found {len(messages)}"
+        raise RecordShapeError(msg)
 
     for position, expected in enumerate(reference):
         if position != index and messages[position] != expected:
-            raise RecordShapeError(
-                f"message {position} is {messages[position]!r}, expected {expected!r}"
-            )
+            msg = f"message {position} is {messages[position]!r}, expected {expected!r}"
+            raise RecordShapeError(msg)
 
     carrier = messages[index]
     content = carrier.get(CONTENT_KEY, "")
     if carrier.get(ROLE_KEY) != reference[index][ROLE_KEY]:
-        raise RecordShapeError(
-            f"message {index} has role {carrier.get(ROLE_KEY)!r}, expected {reference[index][ROLE_KEY]!r}"
+        msg = (
+            f"message {index} has role {carrier.get(ROLE_KEY)!r}, "
+            f"expected {reference[index][ROLE_KEY]!r}"
         )
+        raise RecordShapeError(msg)
     if not content.startswith(prefix) or not content.endswith(suffix):
-        raise RecordShapeError(
-            f"message {index} is not wrapped in the expected prefix {prefix!r} and suffix {suffix!r}"
+        msg = (
+            f"message {index} is not wrapped in the expected "
+            f"prefix {prefix!r} and suffix {suffix!r}"
         )
+        raise RecordShapeError(msg)
 
     answer = messages[-1]
     if answer.get(ROLE_KEY) != ASSISTANT_ROLE:
-        raise RecordShapeError(
-            f"the last message has role {answer.get(ROLE_KEY)!r}, expected {ASSISTANT_ROLE!r}"
-        )
+        msg = f"the last message has role {answer.get(ROLE_KEY)!r}, expected {ASSISTANT_ROLE!r}"
+        raise RecordShapeError(msg)
 
-    return content[len(prefix) : len(content) - len(suffix)], answer.get(CONTENT_KEY, "")
+    source: str = content[len(prefix) : len(content) - len(suffix)]
+    target: str = answer.get(CONTENT_KEY, "")
+    return source, target
 
 
 def prompt_shape_fingerprint() -> str:

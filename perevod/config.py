@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """Model selection."""
 
 from __future__ import annotations

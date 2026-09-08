@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """Offline Russian to Korean translation for Apple Silicon."""
 
 from perevod.config import DEFAULT_MODEL_ID, MODEL_ENV_VAR, resolve_model_id

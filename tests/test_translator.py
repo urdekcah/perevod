@@ -1,3 +1,5 @@
+# © 2026 urdekcah. Все права защищены.
+# Лицензировано в соответствии с условиями AGPL-3.0
 """Translation path over injected loader and generator, with MLX absent."""
 
 import subprocess
@@ -12,29 +14,33 @@ TRANSLATION = "안녕하세요, 어떻게 지내세요?"
 
 
 class FakeTokenizer:
-    def __init__(self):
-        self.seen_messages = None
+    """Records the messages it is handed and renders a fixed prompt."""
 
-    def apply_chat_template(self, messages, **kwargs):
+    def __init__(self) -> None:
+        self.seen_messages: list[dict[str, str]] | None = None
+
+    def apply_chat_template(self, messages: list[dict[str, str]], **_kwargs: object) -> str:
         self.seen_messages = messages
         return "<rendered prompt>"
 
 
 class TranslateTest(unittest.TestCase):
-    def setUp(self):
-        self.tokenizer = FakeTokenizer()
-        self.load_calls = []
-        self.generate_calls = []
+    """The seams the translator loads and generates through."""
 
-    def _loader(self, model_id):
+    def setUp(self) -> None:
+        self.tokenizer = FakeTokenizer()
+        self.load_calls: list[str] = []
+        self.generate_calls: list[dict[str, object]] = []
+
+    def _loader(self, model_id: str) -> tuple[str, FakeTokenizer]:
         self.load_calls.append(model_id)
         return ("<model>", self.tokenizer)
 
-    def _generator(self, model, tokenizer, **kwargs):
+    def _generator(self, _model: object, _tokenizer: object, **kwargs: object) -> str:
         self.generate_calls.append(kwargs)
         return f"  {TRANSLATION}\n"
 
-    def test_translate_loads_once_sends_contract_shape_and_returns_output(self):
+    def test_translate_loads_once_sends_contract_shape_and_returns_output(self) -> None:
         translator = Translator(loader=self._loader, generator=self._generator)
         result = translator.translate(SOURCE)
 
@@ -42,10 +48,15 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(self.tokenizer.seen_messages, build_messages(SOURCE))
         self.assertEqual(result, TRANSLATION)
 
-    def test_import_does_not_pull_in_mlx(self):
+    def test_import_does_not_pull_in_mlx(self) -> None:
         # A module-scope mlx_lm import would break this; the deferred one must stay.
         probe = "import perevod, sys; assert 'mlx_lm' not in sys.modules"
-        completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+        completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
