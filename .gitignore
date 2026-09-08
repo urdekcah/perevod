@@ -224,5 +224,6 @@ CLAUDE.md
 .DS_Store
 
 data/*
+!data/LICENSE
 !data/README.md
 private/
