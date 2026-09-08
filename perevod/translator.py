@@ -6,11 +6,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from typing import Any, cast
 
 from perevod.adapters import check_adapter_compatibility
 from perevod.config import resolve_adapter_path, resolve_model_id
+from perevod.document import (
+    CHARS_PER_TOKEN_RU,
+    DEFAULT_CHUNK_BUDGET_TOKENS,
+    OUTPUT_TOKEN_MULTIPLIER,
+    DocumentResult,
+    DocumentTranslator,
+    Progress,
+    budget_chars_for,
+)
 
 TRANSLATION_INSTRUCTION = (
     "Translate the following Russian text into Korean. "
@@ -117,3 +127,40 @@ class Translator:
             verbose=False,
         )
         return completion.strip()
+
+    def translate_document(  # noqa: PLR0913 -- progress and batch context are all optional
+        self,
+        source_text: str,
+        *,
+        max_tokens: int | None = None,
+        budget_tokens: int = DEFAULT_CHUNK_BUDGET_TOKENS,
+        progress: Callable[[Progress], None] | None = None,
+        sink: Callable[[str], None] | None = None,
+        file_index: int = 0,
+        file_total: int = 1,
+        source_name: str = "",
+    ) -> DocumentResult:
+        """Translate a document by splitting it into chunks and reassembling the result.
+
+        Every chunk travels the same prompt path as a bare string, so an adapter applies here
+        untouched. Left unset, `max_tokens` is sized per chunk from that chunk's length.
+        """
+
+        def translate_chunk(text: str) -> str:
+            ceiling = max_tokens
+            if ceiling is None:
+                estimated = math.ceil(len(text) / CHARS_PER_TOKEN_RU * OUTPUT_TOKEN_MULTIPLIER)
+                ceiling = max(DEFAULT_MAX_TOKENS, estimated)
+            return self.translate(text, max_tokens=ceiling)
+
+        return DocumentTranslator(
+            translate_chunk,
+            budget_chars=budget_chars_for(budget_tokens),
+            progress=progress,
+        ).translate_document(
+            source_text,
+            sink=sink,
+            file_index=file_index,
+            file_total=file_total,
+            source_name=source_name,
+        )

@@ -9,15 +9,25 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
+from click.core import ParameterSource
 
 from perevod.adapters import AdapterProvenanceError
 from perevod.dataset import DEFAULT_SPLIT_DIR, DatasetError, validate_split_dir
+from perevod.document import DEFAULT_CHUNK_BUDGET_TOKENS, DocumentResult, Progress
 from perevod.evaluation import (
     EvaluationConfig,
     EvaluationError,
     evaluate_pair,
     render_summary,
     write_run,
+)
+from perevod.files import (
+    DEFAULT_ENCODING,
+    FileError,
+    IncrementalWriter,
+    check_destination,
+    plan_batch,
+    read_source,
 )
 from perevod.prepare import (
     DEFAULT_MAX_LENGTH_RATIO,
@@ -47,6 +57,31 @@ def main() -> None:
     """Offline Russian to Korean translation."""
 
 
+def _render_progress(event: Progress) -> None:
+    """Progress goes to stderr so a piped stdout stays byte-clean."""
+    if event.phase != "chunk_done":
+        return
+    where = f"{event.source_name}: " if event.source_name else ""
+    batch = f" (file {event.file_index + 1}/{event.file_total})" if event.file_total > 1 else ""
+    state = "" if event.ok else " — FAILED"
+    click.echo(f"{where}chunk {event.chunk_index + 1}/{event.chunk_total}{batch}{state}", err=True)
+
+
+def _write_stdout(fragment: str) -> None:
+    """Fragments go out raw so stdout stays byte-identical to the assembled document."""
+    sys.stdout.write(fragment)
+
+
+def _report(name: str, result: DocumentResult) -> None:
+    if result.aborted:
+        click.echo(f"{name}: aborted after too many consecutive failures", err=True)
+    if result.chunks_failed:
+        failures = ", ".join(str(index) for index in result.chunks_failed)
+        click.echo(
+            f"{name}: {len(result.chunks_failed)} chunk(s) untranslated: {failures}", err=True
+        )
+
+
 @main.command()
 @click.argument("text", required=False)
 @click.option("--model", default=None, help="Model repository id to load instead of the default.")
@@ -65,36 +100,215 @@ def main() -> None:
     type=int,
     default=DEFAULT_MAX_TOKENS,
     show_default=True,
-    help="Upper bound on generated tokens.",
+    help="Upper bound on generated tokens. Given explicitly, it also fixes the per-chunk ceiling.",
 )
-def translate(
+@click.option(
+    "--input",
+    "inputs",
+    multiple=True,
+    type=click.Path(path_type=Path),
+    help="Read the source from this file. Repeatable.",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the translation here instead of standard output. Needs exactly one --input.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write one translation per input into this directory. Required for two or more inputs.",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing destination.")
+@click.option(
+    "--encoding",
+    default=DEFAULT_ENCODING,
+    show_default=True,
+    help="Codec the input files are read with.",
+)
+@click.option(
+    "--chunk-budget",
+    type=int,
+    default=DEFAULT_CHUNK_BUDGET_TOKENS,
+    show_default=True,
+    help="Chunk size in source tokens.",
+)
+@click.option(
+    "--progress/--no-progress",
+    default=None,
+    help="Per-chunk progress on stderr. Defaults to on when stderr is a terminal.",
+)
+@click.pass_context
+def translate(  # noqa: PLR0913, PLR0917 -- one parameter per click option
+    ctx: click.Context,
+    text: str | None,
+    model: str | None,
+    adapter_path: str | None,
+    max_tokens: int,
+    inputs: tuple[Path, ...],
+    output: Path | None,
+    output_dir: Path | None,
+    encoding: str,
+    chunk_budget: int,
+    *,
+    progress: bool | None,
+    force: bool,
+    allow_provenance_mismatch: bool,
+) -> None:
+    """Translate Russian TEXT into Korean.
+
+    Reads standard input when TEXT is omitted or given as "-". With --input the source is
+    read from files instead, split into chunks, and reassembled with its paragraph
+    structure intact. Exits 1 when any chunk failed, 2 on a usage or output-path error.
+    """
+    _reject_conflicting_sources(text, inputs, output, output_dir)
+
+    # Only a value the user typed may override the per-chunk ceiling; the default must not.
+    from_command_line = ctx.get_parameter_source("max_tokens") == ParameterSource.COMMANDLINE
+    explicit_max_tokens = max_tokens if from_command_line else None
+    if progress is None:
+        progress = sys.stderr.isatty()
+
+    try:
+        pairs = _plan_outputs(inputs, output, output_dir, force=force)
+    except FileError as error:
+        raise click.UsageError(str(error)) from error
+
+    if not pairs and not inputs:
+        _translate_text(text, model, adapter_path, max_tokens, mismatch=allow_provenance_mismatch)
+        return
+
+    _translate_files(
+        pairs,
+        model=model,
+        adapter_path=adapter_path,
+        allow_provenance_mismatch=allow_provenance_mismatch,
+        max_tokens=explicit_max_tokens,
+        encoding=encoding,
+        chunk_budget=chunk_budget,
+        show_progress=progress,
+    )
+
+
+def _reject_conflicting_sources(
+    text: str | None,
+    inputs: tuple[Path, ...],
+    output: Path | None,
+    output_dir: Path | None,
+) -> None:
+    if text is not None and inputs:
+        msg = "Pass either TEXT or --input, not both."
+        raise click.UsageError(msg)
+    if any(str(path) == "-" for path in inputs):
+        msg = 'Standard input is the positional form: omit --input or pass "-" as TEXT.'
+        raise click.UsageError(msg)
+    if output is not None and output_dir is not None:
+        msg = "Pass either --output or --output-dir, not both."
+        raise click.UsageError(msg)
+    if output is not None and len(inputs) != 1:
+        msg = "--output needs exactly one --input; use --output-dir for several."
+        raise click.UsageError(msg)
+    if len(inputs) > 1 and output_dir is None:
+        msg = "Two or more --input files need --output-dir."
+        raise click.UsageError(msg)
+    if (output is not None or output_dir is not None) and not inputs:
+        msg = "--output and --output-dir only apply to --input."
+        raise click.UsageError(msg)
+
+
+def _plan_outputs(
+    inputs: tuple[Path, ...],
+    output: Path | None,
+    output_dir: Path | None,
+    *,
+    force: bool,
+) -> list[tuple[Path, Path | None]]:
+    """Refuse every unsafe destination before the model is loaded."""
+    if not inputs:
+        return []
+    if output is not None:
+        check_destination(output, inputs[0], force=force)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        return [(inputs[0], output)]
+    if output_dir is None:
+        return [(inputs[0], None)]
+    return list(plan_batch(list(inputs), output_dir, force=force))
+
+
+def _translate_text(
     text: str | None,
     model: str | None,
     adapter_path: str | None,
     max_tokens: int,
     *,
-    allow_provenance_mismatch: bool,
+    mismatch: bool,
 ) -> None:
-    """Translate Russian TEXT into Korean.
-
-    Reads standard input when TEXT is omitted or given as "-".
-    """
     source = sys.stdin.read() if text is None or text == "-" else text
     source = source.strip()
     if not source:
         msg = "No source text. Pass it as an argument or on standard input."
         raise click.UsageError(msg)
 
+    translator = _build_translator(model, adapter_path, mismatch=mismatch)
+    click.echo(translator.translate(source, max_tokens=max_tokens))
+
+
+def _build_translator(model: str | None, adapter_path: str | None, *, mismatch: bool) -> Translator:
     try:
-        translator = Translator(
-            model,
-            adapter_path=adapter_path,
-            allow_provenance_mismatch=allow_provenance_mismatch,
-        )
+        return Translator(model, adapter_path=adapter_path, allow_provenance_mismatch=mismatch)
     except AdapterProvenanceError as error:
         raise click.ClickException(str(error)) from error
 
-    click.echo(translator.translate(source, max_tokens=max_tokens))
+
+def _translate_files(  # noqa: PLR0913 -- the option surface of one subcommand
+    pairs: list[tuple[Path, Path | None]],
+    *,
+    model: str | None,
+    adapter_path: str | None,
+    allow_provenance_mismatch: bool,
+    max_tokens: int | None,
+    encoding: str,
+    chunk_budget: int,
+    show_progress: bool,
+) -> None:
+    try:
+        sources = [read_source(source, encoding=encoding) for source, _ in pairs]
+    except FileError as error:
+        raise click.ClickException(str(error)) from error
+
+    # One construction, one model load, however many files follow.
+    translator = _build_translator(model, adapter_path, mismatch=allow_provenance_mismatch)
+    on_progress = _render_progress if show_progress else None
+    failed = False
+
+    for position, ((source, destination), body) in enumerate(zip(pairs, sources, strict=True)):
+        writer = IncrementalWriter(destination) if destination is not None else None
+        sink = writer.write if writer is not None else _write_stdout
+        try:
+            result = translator.translate_document(
+                body,
+                max_tokens=max_tokens,
+                budget_tokens=chunk_budget,
+                progress=on_progress,
+                sink=sink,
+                file_index=position,
+                file_total=len(pairs),
+                source_name=source.name,
+            )
+        except BaseException:
+            if writer is not None:
+                writer.abandon()
+                click.echo(f"Completed chunks kept in {writer.part_path}", err=True)
+            raise
+        if writer is not None:
+            writer.commit()
+        _report(source.name, result)
+        failed = failed or bool(result.chunks_failed)
+
+    if failed:
+        raise SystemExit(1)
 
 
 @main.command("prepare-data")
