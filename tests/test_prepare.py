@@ -16,7 +16,6 @@ from perevod.dataset import (
     TRAIN_FILENAME,
     VALID_FILENAME,
     parse_training_record,
-    prompt_shape_fingerprint,
 )
 from perevod.prepare import (
     InputError,
@@ -27,6 +26,7 @@ from perevod.prepare import (
     PrepareResult,
     prepare_splits,
 )
+from perevod.translator import prompt_shape_fingerprint
 
 
 def sample_pairs(count: int) -> list[tuple[str, str]]:

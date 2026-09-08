@@ -4,8 +4,11 @@
 
 import unittest
 
-from perevod.dataset import prompt_shape_fingerprint
-from perevod.translator import TRANSLATION_INSTRUCTION, build_messages
+from perevod.translator import (
+    TRANSLATION_INSTRUCTION,
+    build_messages,
+    prompt_shape_fingerprint,
+)
 
 # Changing either pin invalidates every adapter already trained; there is no migration.
 SHIPPED_ROLES = ("system", "user")

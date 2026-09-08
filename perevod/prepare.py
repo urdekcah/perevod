@@ -20,8 +20,8 @@ from perevod.dataset import (
     VALID_FILENAME,
     DatasetError,
     build_training_record,
-    prompt_shape_fingerprint,
 )
+from perevod.translator import prompt_shape_fingerprint
 
 PAIR_DELIMITER = "|||"
 INPUT_SUFFIX = ".txt"

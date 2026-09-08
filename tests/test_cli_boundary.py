@@ -42,6 +42,15 @@ class CliBoundaryTest(unittest.TestCase):
     def test_does_not_duplicate_the_prompt(self) -> None:
         self.assertNotIn(TRANSLATION_INSTRUCTION, self.source)
 
+    def test_offers_the_adapter_options_on_translate(self) -> None:
+        for option in ("--adapter-path", "--allow-provenance-mismatch"):
+            with self.subTest(option=option):
+                self.assertIn(f'"{option}"', self.source)
+
+    def test_leaves_the_compatibility_decision_to_the_library(self) -> None:
+        self.assertNotIn("check_adapter_compatibility", self.source)
+        self.assertNotIn("read_provenance", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

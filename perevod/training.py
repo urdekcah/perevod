@@ -7,11 +7,15 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from perevod.adapters import AdapterProvenance, write_provenance
 from perevod.config import resolve_model_id
 from perevod.dataset import DEFAULT_SPLIT_DIR, validate_split_dir
+from perevod.translator import prompt_shape_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -183,4 +187,23 @@ def train_adapter(
     if code != 0:
         msg = f"{TRAINER_MODULE} exited {code}; its own output above says why"
         raise TrainerFailedError(msg)
+
+    write_provenance(adapter_path, _provenance_for(config))
     return adapter_path, report
+
+
+def _provenance_for(config: TrainingConfig) -> AdapterProvenance:
+    """Recorded here because nothing downstream can reconstruct it."""
+    return AdapterProvenance(
+        base_model_id=resolve_model_id(config.model_id),
+        prompt_shape_fingerprint=prompt_shape_fingerprint(),
+        created_at=datetime.now(tz=UTC).date().isoformat(),
+        mlx_lm_version=_trainer_version(),
+    )
+
+
+def _trainer_version() -> str | None:
+    try:
+        return version("mlx-lm")
+    except PackageNotFoundError:
+        return None

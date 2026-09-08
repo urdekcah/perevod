@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
 
+from perevod.adapters import AdapterProvenanceError
 from perevod.dataset import DEFAULT_SPLIT_DIR, DatasetError, validate_split_dir
 from perevod.prepare import (
     DEFAULT_MAX_LENGTH_RATIO,
@@ -43,13 +44,30 @@ def main() -> None:
 @click.argument("text", required=False)
 @click.option("--model", default=None, help="Model repository id to load instead of the default.")
 @click.option(
+    "--adapter-path",
+    default=None,
+    help="Fine-tuned adapter directory to load over the base model.",
+)
+@click.option(
+    "--allow-provenance-mismatch",
+    is_flag=True,
+    help="Use an adapter trained against another base or prompt shape anyway.",
+)
+@click.option(
     "--max-tokens",
     type=int,
     default=DEFAULT_MAX_TOKENS,
     show_default=True,
     help="Upper bound on generated tokens.",
 )
-def translate(text: str | None, model: str | None, max_tokens: int) -> None:
+def translate(
+    text: str | None,
+    model: str | None,
+    adapter_path: str | None,
+    max_tokens: int,
+    *,
+    allow_provenance_mismatch: bool,
+) -> None:
     """Translate Russian TEXT into Korean.
 
     Reads standard input when TEXT is omitted or given as "-".
@@ -60,7 +78,16 @@ def translate(text: str | None, model: str | None, max_tokens: int) -> None:
         msg = "No source text. Pass it as an argument or on standard input."
         raise click.UsageError(msg)
 
-    click.echo(Translator(model).translate(source, max_tokens=max_tokens))
+    try:
+        translator = Translator(
+            model,
+            adapter_path=adapter_path,
+            allow_provenance_mismatch=allow_provenance_mismatch,
+        )
+    except AdapterProvenanceError as error:
+        raise click.ClickException(str(error)) from error
+
+    click.echo(translator.translate(source, max_tokens=max_tokens))
 
 
 @main.command("prepare-data")

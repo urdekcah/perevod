@@ -4,13 +4,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from perevod.translator import build_messages
+from perevod.translator import SHAPE_SENTINEL, build_messages, reference_messages
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,9 +36,6 @@ CHAT_ROLES = ("system", "user", ASSISTANT_ROLE)
 PROMPT_KEY = "prompt"
 COMPLETION_KEY = "completion"
 TEXT_KEY = "text"
-
-# Stands in for the source while the scaffolding around it is measured.
-SHAPE_SENTINEL = "«PEREVOD-SOURCE»"
 
 _REGENERATE_HINT = "regenerate the splits with `perevod prepare-data`"
 
@@ -69,13 +65,9 @@ class SplitReport:
     notices: tuple[str, ...]
 
 
-def _reference_messages() -> list[dict[str, str]]:
-    return build_messages(SHAPE_SENTINEL)
-
-
 def _affixes() -> tuple[int, str, str]:
     """Which message carries the source, and the constant text either side of it."""
-    messages = _reference_messages()
+    messages = reference_messages()
     carriers = [i for i, message in enumerate(messages) if SHAPE_SENTINEL in message[CONTENT_KEY]]
     if len(carriers) != 1:
         msg = (
@@ -111,7 +103,7 @@ def parse_training_record(record: object) -> tuple[str, str]:
         RecordShapeError: The role sequence or scaffolding has drifted.
     """
     index, prefix, suffix = _affixes()
-    reference = _reference_messages()
+    reference = reference_messages()
 
     if not isinstance(record, dict) or not isinstance(record.get(MESSAGES_KEY), list):
         msg = f"record is not an object carrying a {MESSAGES_KEY!r} list"
@@ -150,14 +142,6 @@ def parse_training_record(record: object) -> tuple[str, str]:
     source: str = content[len(prefix) : len(content) - len(suffix)]
     target: str = answer.get(CONTENT_KEY, "")
     return source, target
-
-
-def prompt_shape_fingerprint() -> str:
-    """Digest of the shipped prompt shape; splits built against an older one stay detectable."""
-    canonical = json.dumps(
-        _reference_messages(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _check_chat_messages(messages: object) -> None:

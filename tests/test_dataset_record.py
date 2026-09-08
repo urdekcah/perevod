@@ -9,13 +9,11 @@ from perevod.dataset import (
     CONTENT_KEY,
     MESSAGES_KEY,
     ROLE_KEY,
-    SHAPE_SENTINEL,
     RecordShapeError,
     build_training_record,
     parse_training_record,
-    prompt_shape_fingerprint,
 )
-from perevod.translator import build_messages
+from perevod.translator import SHAPE_SENTINEL, build_messages, prompt_shape_fingerprint
 
 
 class BuildTrainingRecordTests(unittest.TestCase):

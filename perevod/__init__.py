@@ -2,7 +2,18 @@
 # Лицензировано в соответствии с условиями AGPL-3.0
 """Offline Russian to Korean translation for Apple Silicon."""
 
-from perevod.config import DEFAULT_MODEL_ID, MODEL_ENV_VAR, resolve_model_id
+from perevod.adapters import (
+    PROVENANCE_FILENAME,
+    PROVENANCE_SCHEMA_VERSION,
+    AdapterMismatchError,
+    AdapterProvenance,
+    AdapterProvenanceError,
+    check_adapter_compatibility,
+    provenance_path,
+    read_provenance,
+    write_provenance,
+)
+from perevod.config import ADAPTER_ENV_VAR, DEFAULT_MODEL_ID, MODEL_ENV_VAR, resolve_model_id
 from perevod.dataset import (
     DEFAULT_SPLIT_DIR,
     MANIFEST_FILENAME,
@@ -17,7 +28,6 @@ from perevod.dataset import (
     build_training_record,
     classify_record,
     parse_training_record,
-    prompt_shape_fingerprint,
     validate_schema,
     validate_split_dir,
     validate_training_file,
@@ -32,6 +42,7 @@ from perevod.prepare import (
     prepare_splits,
     render_report,
 )
+from perevod.probes import PROBE_SENTENCES, run_probe_set
 from perevod.training import (
     DEFAULT_ADAPTER_ROOT,
     DEFAULT_RUN_NAME,
@@ -44,20 +55,28 @@ from perevod.training import (
     resolve_adapter_path,
     train_adapter,
 )
-from perevod.translator import Translator
+from perevod.translator import ADAPTER_LOAD_PARAM, Translator, prompt_shape_fingerprint
 
 __all__ = [
+    "ADAPTER_ENV_VAR",
+    "ADAPTER_LOAD_PARAM",
     "DEFAULT_ADAPTER_ROOT",
     "DEFAULT_MODEL_ID",
     "DEFAULT_RUN_NAME",
     "DEFAULT_SPLIT_DIR",
     "MANIFEST_FILENAME",
     "MODEL_ENV_VAR",
+    "PROBE_SENTENCES",
+    "PROVENANCE_FILENAME",
+    "PROVENANCE_SCHEMA_VERSION",
     "TEST_FILENAME",
     "TRAIN_FILENAME",
     "VALID_FILENAME",
     "AdapterExistsError",
+    "AdapterMismatchError",
     "AdapterPathError",
+    "AdapterProvenance",
+    "AdapterProvenanceError",
     "DatasetError",
     "InputError",
     "OutputExistsError",
@@ -75,15 +94,20 @@ __all__ = [
     "Translator",
     "build_argv",
     "build_training_record",
+    "check_adapter_compatibility",
     "classify_record",
     "parse_training_record",
     "prepare_splits",
     "prompt_shape_fingerprint",
+    "provenance_path",
+    "read_provenance",
     "render_report",
     "resolve_adapter_path",
     "resolve_model_id",
+    "run_probe_set",
     "train_adapter",
     "validate_schema",
     "validate_split_dir",
     "validate_training_file",
+    "write_provenance",
 ]
