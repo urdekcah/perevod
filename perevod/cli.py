@@ -12,6 +12,13 @@ import click
 
 from perevod.adapters import AdapterProvenanceError
 from perevod.dataset import DEFAULT_SPLIT_DIR, DatasetError, validate_split_dir
+from perevod.evaluation import (
+    EvaluationConfig,
+    EvaluationError,
+    evaluate_pair,
+    render_summary,
+    write_run,
+)
 from perevod.prepare import (
     DEFAULT_MAX_LENGTH_RATIO,
     DEFAULT_OUTPUT_DIR,
@@ -235,3 +242,60 @@ def train(**options: object) -> None:
     for notice in report.notices:
         click.echo(notice, err=True)
     click.echo(f"Adapter written to {adapter_path}")
+
+
+@main.command()
+@click.option(
+    "--test-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Held-out split to score; defaults to data/splits/test.jsonl.",
+)
+@click.option(
+    "--adapter-path",
+    default=None,
+    help="Adapter directory forming the second arm.",
+)
+@click.option("--model", "model_id", default=None, help="Base model repository id.")
+@click.option("--limit", type=int, default=None, help="Score only the first N rows in file order.")
+@click.option(
+    "--repeats",
+    type=int,
+    default=None,
+    help="Passes per arm; the spread between them becomes the noise floor.",
+)
+@click.option("--max-tokens", type=int, default=None, help="Upper bound on generated tokens.")
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory the run record and the index are written to.",
+)
+@click.option(
+    "--bootstrap-seed",
+    type=int,
+    default=None,
+    help="Enable the paired bootstrap with this seed; it can only widen the floor.",
+)
+@click.option(
+    "--allow-provenance-mismatch",
+    is_flag=True,
+    help="Run against an adapter fitted to another base; the verdict is then withheld.",
+)
+def evaluate(**options: object) -> None:
+    """Score the base model against an adapter on the held-out split.
+
+    Both arms translate the same rows with the same settings. Read the verdict, not the delta.
+    """
+    supplied = {name: value for name, value in options.items() if value is not None}
+    config = EvaluationConfig(**supplied)  # type: ignore[arg-type]
+
+    try:
+        run = evaluate_pair(config)
+    except (AdapterProvenanceError, DatasetError, EvaluationError) as error:
+        raise click.ClickException(str(error)) from error
+
+    target = write_run(run, config.out_dir)
+    click.echo(f"Record written to {target}", err=True)
+    click.echo(render_summary(run))
