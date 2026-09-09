@@ -1,12 +1,12 @@
 # © 2026 urdekcah. Все права защищены.
 # Лицензировано в соответствии с условиями AGPL-3.0
-"""LoRA fine-tuning: what to hand mlx_lm.lora, and what to refuse to start."""
+"""LoRA fine-tuning: what to hand the trainer, and what to refuse to start."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 
 from perevod.adapters import AdapterProvenance, write_provenance
 from perevod.config import resolve_model_id
-from perevod.dataset import DEFAULT_SPLIT_DIR, validate_split_dir
+from perevod.dataset import (
+    DEFAULT_SPLIT_DIR,
+    TRAIN_FILENAME,
+    VALID_FILENAME,
+    validate_split_dir,
+)
 from perevod.translator import prompt_shape_fingerprint
 
 if TYPE_CHECKING:
@@ -25,11 +30,21 @@ if TYPE_CHECKING:
 DEFAULT_ADAPTER_ROOT = Path("data/adapters")
 DEFAULT_RUN_NAME = "current"
 
-TRAINER_MODULE = "mlx_lm.lora"
+# mlx_lm.lora is deprecated; the console script would resolve through PATH.
+TRAINER_MODULE = ("mlx_lm", "lora")
+
+# Validation iterates too; the test split never does — build_argv emits no test mode.
+CHECKED_SPLITS = (TRAIN_FILENAME, VALID_FILENAME)
+
+WEIGHTS_SUFFIX = ".safetensors"
 
 
 class TrainingError(Exception):
     """Base for the errors this module raises."""
+
+
+class SplitTooSmallError(TrainingError):
+    """Refused: a split the trainer iterates holds fewer rows than one batch."""
 
 
 class AdapterExistsError(TrainingError):
@@ -136,7 +151,7 @@ def build_argv(
         "grad_checkpoint": config.grad_checkpoint,
     }
 
-    argv = [sys.executable, "-m", TRAINER_MODULE]
+    argv = [sys.executable, "-m", *TRAINER_MODULE]
     for name, spec in flags.items():
         argv.extend(_render(spec, values[name]))
     return argv
@@ -155,6 +170,49 @@ def _run(argv: list[str]) -> int:
     return subprocess.run(argv, check=False).returncode  # noqa: S603
 
 
+def _preflight_batch_size(report: SplitReport, batch_size: int | None) -> SplitReport:
+    """Refuse a split too short for one batch, while refusing still costs nothing.
+
+    The trainer guards itself, but only after the base has loaded in the subprocess. An unset
+    batch size leaves its own default in force, and the project does not guess at that number.
+
+    Raises:
+        SplitTooSmallError: A split the run will iterate is shorter than one batch.
+    """
+    floor = 1 if batch_size is None else batch_size
+    short = [
+        f"{report.data_dir / name} holds {rows} row(s)"
+        for name in CHECKED_SPLITS
+        if (rows := report.rows.get(name)) is not None and rows < floor
+    ]
+    if short:
+        found = "; ".join(short)
+        msg = (
+            f"{found}. The trainer cannot form a batch from an empty split."
+            if batch_size is None
+            else f"{found}. Every split the trainer iterates needs at least {batch_size} row(s); "
+            f"lower the batch size or add data."
+        )
+        raise SplitTooSmallError(msg)
+
+    if batch_size is None:
+        notice = (
+            "batch size is unset, so the trainer's own default stands and row counts were not "
+            "compared against it; only empty splits were refused."
+        )
+        return replace(report, notices=(*report.notices, notice))
+    return report
+
+
+def _is_unfinished_run(adapter_path: Path) -> bool:
+    """Whether the directory holds only the debris of a run that died.
+
+    Config lands before the first step and weights only from inside the loop, so files
+    without weights hold nothing worth protecting.
+    """
+    return any(adapter_path.glob("*")) and not any(adapter_path.glob(f"*{WEIGHTS_SUFFIX}"))
+
+
 def train_adapter(
     config: TrainingConfig,
     *,
@@ -163,17 +221,26 @@ def train_adapter(
 ) -> tuple[Path, SplitReport]:
     """Fit a LoRA adapter, once the data has been proven worth spending hours on.
 
-    `runner` is the test seam; it also keeps mlx_lm out of the import path.
+    `runner` is the test seam, and keeps mlx_lm out of the import path.
 
     Raises:
-        DatasetError: Bad splits — raised before the trainer is invoked.
-        AdapterExistsError: Output exists and `overwrite` is unset.
+        DatasetError: Bad splits.
+        SplitTooSmallError: A checked split is shorter than one batch.
+        AdapterPathError: The output path lands inside the splits.
+        AdapterExistsError: Output holds weights and `overwrite` is unset.
         TrainerFailedError: The trainer exited non-zero.
     """
-    report = validate_split_dir(config.data_dir)
+    report = _preflight_batch_size(validate_split_dir(config.data_dir), config.batch_size)
     adapter_path = resolve_adapter_path(config)
 
-    if not config.overwrite and any(adapter_path.glob("*")):
+    if _is_unfinished_run(adapter_path):
+        print(  # noqa: T201 -- stdout belongs to the trainer's own progress
+            f"{adapter_path}: a previous run left this unfinished, with no weights written. "
+            f"Continuing into it. Its files are not removed, so choose another run name if you "
+            f"need a clean directory.",
+            file=sys.stderr,
+        )
+    elif not config.overwrite and any(adapter_path.glob("*")):
         msg = (
             f"{adapter_path}: already holds an adapter. Training it again may cost hours, so "
             f"pass overwrite to replace it or choose another run name."
@@ -185,7 +252,8 @@ def train_adapter(
 
     code = (_run if runner is None else runner)(argv)
     if code != 0:
-        msg = f"{TRAINER_MODULE} exited {code}; its own output above says why"
+        invocation = f"{sys.executable} -m {' '.join(TRAINER_MODULE)}"
+        msg = f"{invocation} exited {code}; its own output above says why"
         raise TrainerFailedError(msg)
 
     write_provenance(adapter_path, _provenance_for(config))
