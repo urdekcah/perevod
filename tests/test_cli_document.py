@@ -4,6 +4,8 @@
 
 import tempfile
 import unittest
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -15,10 +17,21 @@ from perevod.document import UNTRANSLATED_OPEN, join_translations, split_documen
 from perevod.translator import Translator
 
 RUSSIAN = "Первый абзац.\n\nВторой абзац.\n\nТретий абзац.\n"
+THINK_START = "<|channel>thought"
+THINK_END = "<channel|>"
+
+
+@dataclass(frozen=True)
+class _Response:
+    text: str
+    finish_reason: str | None
 
 
 class _Tokenizer:
-    """Hands the chunk straight back so the fake generator can echo it."""
+    """Hands the chunk straight back, and advertises the delimiters the guard looks for."""
+
+    think_start = THINK_START
+    think_end = THINK_END
 
     def apply_chat_template(self, messages: list[dict[str, str]], **_: object) -> str:
         return messages[-1]["content"]
@@ -27,20 +40,32 @@ class _Tokenizer:
 class TranslatorFactory:
     """Builds real translators over fake weights and counts how often they load."""
 
-    def __init__(self, *, refuse: str = "") -> None:
+    def __init__(self, *, refuse: str = "", contaminate: str = "", truncate: str = "") -> None:
         self.loads: list[str] = []
         self._refuse = refuse
+        self._contaminate = contaminate
+        self._truncate = truncate
 
     def _load(self, model_id: str, **_: object) -> tuple[object, _Tokenizer]:
         self.loads.append(model_id)
         return object(), _Tokenizer()
 
-    def _generate(self, _model: object, _tokenizer: object, **kwargs: Any) -> str:  # noqa: ANN401
+    def _generate(
+        self,
+        _model: object,
+        _tokenizer: object,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> Iterator[_Response]:
         prompt = str(kwargs["prompt"])
         if self._refuse and self._refuse in prompt:
             msg = "backend refused this chunk"
             raise RuntimeError(msg)
-        return f"[ko]{prompt}"
+        if self._contaminate and self._contaminate in prompt:
+            yield _Response(f"{THINK_START} рассуждение {THINK_END}[ko]{prompt}", "stop")
+        elif self._truncate and self._truncate in prompt:
+            yield _Response("[ko]обрыв", "length")
+        else:
+            yield _Response(f"[ko]{prompt}", "stop")
 
     def __call__(self, model_id: str | None = None, **kwargs: object) -> Translator:
         return Translator(model_id, loader=self._load, generator=self._generate, **kwargs)  # type: ignore[arg-type]
@@ -136,6 +161,31 @@ class CliDocumentTest(unittest.TestCase):
         self.assertEqual(over_existing.exit_code, 2)
         self.assertEqual(existing.read_text(encoding="utf-8"), "уже здесь")
         self.assertEqual(factory.loads, [])
+
+    def test_a_reasoning_trace_is_reported_and_kept_out_of_the_written_file(self) -> None:
+        source = self._write("doc.txt")
+        out = self.root / "doc.ko.txt"
+        factory = TranslatorFactory(contaminate="Второй")
+
+        result = self._run(["--input", str(source), "--output", str(out)], factory)
+        written = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertNotIn(THINK_START, written)
+        self.assertIn(UNTRANSLATED_OPEN.format(index=1), written)
+        self.assertIn("1 chunk(s) untranslated", result.stderr)
+
+    def test_a_chunk_that_ran_out_of_budget_is_reported_not_written(self) -> None:
+        source = self._write("doc.txt")
+        out = self.root / "doc.ko.txt"
+        factory = TranslatorFactory(truncate="Второй")
+
+        result = self._run(["--input", str(source), "--output", str(out)], factory)
+        written = out.read_text(encoding="utf-8")
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertNotIn("[ko]обрыв", written)
+        self.assertIn(UNTRANSLATED_OPEN.format(index=1), written)
 
     def test_the_bare_string_path_is_unchanged(self) -> None:
         factory = TranslatorFactory()

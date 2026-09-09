@@ -9,15 +9,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 from perevod.adapters import AdapterMismatchError, AdapterProvenance, write_provenance
 from perevod.config import ADAPTER_ENV_VAR, DEFAULT_MODEL_ID
 from perevod.translator import (
     ADAPTER_LOAD_PARAM,
+    ReasoningLeakError,
     Translator,
+    TruncatedTranslationError,
     build_messages,
     prompt_shape_fingerprint,
 )
@@ -25,16 +28,48 @@ from perevod.translator import (
 SOURCE = "Здравствуйте, как дела?"
 TRANSLATION = "안녕하세요, 어떻게 지내세요?"
 
+THINK_START = "<|channel>thought"
+THINK_END = "<channel|>"
+
 
 class FakeTokenizer:
-    """Records the messages it is handed and renders a fixed prompt."""
+    """Records the render call; advertises reasoning delimiters only when asked to."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, delimiters: tuple[str, str] | None = None) -> None:
         self.seen_messages: list[dict[str, str]] | None = None
+        self.seen_kwargs: dict[str, object] = {}
+        if delimiters is not None:
+            self.think_start, self.think_end = delimiters
 
-    def apply_chat_template(self, messages: list[dict[str, str]], **_kwargs: object) -> str:
+    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs: object) -> str:
         self.seen_messages = messages
+        self.seen_kwargs = kwargs
         return "<rendered prompt>"
+
+
+@dataclass(frozen=True)
+class FakeResponse:
+    """One yield of the generation seam."""
+
+    text: str
+    finish_reason: str | None
+
+
+class FakeStream:
+    """Yields incremental segments; only the terminal one carries a finish reason."""
+
+    def __init__(self, *segments: str, finish_reason: str | None = "stop") -> None:
+        self.segments = segments
+        self.finish_reason = finish_reason
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(
+        self, _model: object, _tokenizer: object, **kwargs: object
+    ) -> Iterator[FakeResponse]:
+        self.calls.append(kwargs)
+        last = len(self.segments) - 1
+        for index, segment in enumerate(self.segments):
+            yield FakeResponse(segment, self.finish_reason if index == last else None)
 
 
 class TranslateTest(unittest.TestCase):
@@ -47,23 +82,37 @@ class TranslateTest(unittest.TestCase):
         self.addCleanup(env.stop)
         self.tokenizer = FakeTokenizer()
         self.load_calls: list[str] = []
-        self.generate_calls: list[dict[str, object]] = []
 
     def _loader(self, model_id: str) -> tuple[str, FakeTokenizer]:
         self.load_calls.append(model_id)
         return ("<model>", self.tokenizer)
 
-    def _generator(self, _model: object, _tokenizer: object, **kwargs: object) -> str:
-        self.generate_calls.append(kwargs)
-        return f"  {TRANSLATION}\n"
+    def _build(self, stream: FakeStream) -> Translator:
+        return Translator(loader=self._loader, generator=stream)
 
     def test_translate_loads_once_sends_contract_shape_and_returns_output(self) -> None:
-        translator = Translator(loader=self._loader, generator=self._generator)
+        translator = self._build(FakeStream(f"  {TRANSLATION}\n"))
+
         result = translator.translate(SOURCE)
 
         self.assertEqual(self.load_calls, [DEFAULT_MODEL_ID])
         self.assertEqual(self.tokenizer.seen_messages, build_messages(SOURCE))
         self.assertEqual(result, TRANSLATION)
+
+    def test_the_render_call_turns_the_reasoning_channel_off(self) -> None:
+        self._build(FakeStream(TRANSLATION)).translate(SOURCE)
+
+        self.assertEqual(
+            self.tokenizer.seen_kwargs,
+            {"add_generation_prompt": True, "tokenize": False, "enable_thinking": False},
+        )
+
+    def test_the_generation_call_carries_no_parameter_the_seam_lacks(self) -> None:
+        stream = FakeStream(TRANSLATION)
+
+        self._build(stream).translate(SOURCE, max_tokens=64)
+
+        self.assertEqual(stream.calls, [{"prompt": "<rendered prompt>", "max_tokens": 64}])
 
     def test_import_does_not_pull_in_mlx(self) -> None:
         # A module-scope mlx_lm import would break this; the deferred one must stay.
@@ -75,6 +124,140 @@ class TranslateTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+class AccumulationTest(unittest.TestCase):
+    """Segments arrive one at a time and the terminal one is part of the answer."""
+
+    def setUp(self) -> None:
+        env = mock.patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.tokenizer = FakeTokenizer()
+
+    def _build(self, stream: FakeStream) -> Translator:
+        return Translator(loader=lambda _model_id: ("<model>", self.tokenizer), generator=stream)
+
+    def test_every_segment_including_the_terminal_one_reaches_the_result(self) -> None:
+        # Returning only the last segment gives "요"; dropping it gives "안녕하세".
+        result = self._build(FakeStream("  안녕", "하세", "요\n")).translate(SOURCE)
+
+        self.assertEqual(result, "안녕하세요")
+
+    def test_the_result_is_the_exact_concatenation_of_what_was_yielded(self) -> None:
+        segments = ("첫", " 번", "째 ", "문장.")
+
+        result = self._build(FakeStream(*segments)).translate(SOURCE)
+
+        self.assertEqual(result, "".join(segments))
+
+
+class TruncationTest(unittest.TestCase):
+    """A run that stopped without the model saying it was done is a failure, not a result."""
+
+    def setUp(self) -> None:
+        env = mock.patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.tokenizer = FakeTokenizer()
+
+    def _build(self, stream: FakeStream) -> Translator:
+        return Translator(loader=lambda _model_id: ("<model>", self.tokenizer), generator=stream)
+
+    def test_a_finished_run_returns_its_text(self) -> None:
+        result = self._build(FakeStream(TRANSLATION, finish_reason="stop")).translate(SOURCE)
+
+        self.assertEqual(result, TRANSLATION)
+
+    def test_running_out_of_budget_raises(self) -> None:
+        translator = self._build(FakeStream("안녕하", finish_reason="length"))
+
+        with self.assertRaises(TruncatedTranslationError):
+            translator.translate(SOURCE)
+
+    def test_the_error_carries_the_budget_and_the_text_that_was_produced(self) -> None:
+        translator = self._build(FakeStream("안녕", "하", finish_reason="length"))
+
+        with self.assertRaises(TruncatedTranslationError) as caught:
+            translator.translate(SOURCE, max_tokens=7)
+
+        self.assertEqual(caught.exception.max_tokens, 7)
+        self.assertEqual(caught.exception.partial_text, "안녕하")
+        self.assertIn("7", str(caught.exception))
+
+    def test_a_terminal_response_without_a_reason_is_not_a_completion_signal(self) -> None:
+        translator = self._build(FakeStream("안녕하", finish_reason=None))
+
+        with self.assertRaises(TruncatedTranslationError):
+            translator.translate(SOURCE)
+
+
+class ReasoningGuardTest(unittest.TestCase):
+    """Suppression is asserted at the output, never patched up."""
+
+    def setUp(self) -> None:
+        env = mock.patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _build(self, tokenizer: FakeTokenizer, stream: FakeStream) -> Translator:
+        return Translator(loader=lambda _model_id: ("<model>", tokenizer), generator=stream)
+
+    def test_a_clean_completion_is_returned_unchanged(self) -> None:
+        tokenizer = FakeTokenizer(delimiters=(THINK_START, THINK_END))
+
+        result = self._build(tokenizer, FakeStream(TRANSLATION)).translate(SOURCE)
+
+        self.assertEqual(result, TRANSLATION)
+
+    def test_a_surviving_delimiter_raises_and_names_itself(self) -> None:
+        tokenizer = FakeTokenizer(delimiters=(THINK_START, THINK_END))
+        contaminated = f"{THINK_START} The user wants Korean. {THINK_END}{TRANSLATION}"
+
+        with self.assertRaises(ReasoningLeakError) as caught:
+            self._build(tokenizer, FakeStream(contaminated)).translate(SOURCE)
+
+        self.assertEqual(caught.exception.delimiter, THINK_START)
+        self.assertIn(THINK_START, str(caught.exception))
+
+    def test_a_tokenizer_with_no_delimiters_degrades_to_no_check(self) -> None:
+        result = self._build(FakeTokenizer(), FakeStream(f"{THINK_START} whatever")).translate(
+            SOURCE
+        )
+
+        self.assertEqual(result, f"{THINK_START} whatever")
+
+
+class GuardCoverageTest(unittest.TestCase):
+    """The fakes must be able to produce what the guards catch, or they prove nothing."""
+
+    def setUp(self) -> None:
+        env = mock.patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.tokenizer = FakeTokenizer(delimiters=(THINK_START, THINK_END))
+
+    def _build(self, stream: FakeStream) -> Translator:
+        return Translator(loader=lambda _model_id: ("<model>", self.tokenizer), generator=stream)
+
+    def test_the_fake_tokenizer_advertises_delimiters_the_guard_can_find(self) -> None:
+        self.assertEqual(self.tokenizer.think_start, THINK_START)
+        self.assertEqual(self.tokenizer.think_end, THINK_END)
+
+    def test_without_the_guard_the_reasoning_trace_flows_straight_through(self) -> None:
+        trace = f"{THINK_START} рассуждение {THINK_END}{TRANSLATION}"
+        translator = self._build(FakeStream(trace))
+
+        with mock.patch.object(Translator, "_leaked_delimiter", return_value=None):
+            self.assertEqual(translator.translate(SOURCE), trace)
+
+    def test_truncated_text_is_reachable_only_through_the_error(self) -> None:
+        translator = self._build(FakeStream("안녕", "하세", finish_reason="length"))
+
+        with self.assertRaises(TruncatedTranslationError) as caught:
+            translator.translate(SOURCE)
+
+        self.assertEqual(caught.exception.partial_text, "안녕하세")
 
 
 class AdapterLoadTest(unittest.TestCase):
@@ -91,11 +274,8 @@ class AdapterLoadTest(unittest.TestCase):
         self.calls.append((args, kwargs))
         return ("<model>", FakeTokenizer())
 
-    def _generator(self, *_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return TRANSLATION
-
     def _build(self, **kwargs: object) -> Translator:
-        return Translator(loader=self._loader, generator=self._generator, **kwargs)  # type: ignore[arg-type]
+        return Translator(loader=self._loader, generator=FakeStream(TRANSLATION), **kwargs)  # type: ignore[arg-type]
 
     def _annotate(self, **overrides: str) -> None:
         record = AdapterProvenance(

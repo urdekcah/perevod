@@ -125,7 +125,14 @@ from perevod.training import (
     resolve_adapter_path,
     train_adapter,
 )
-from perevod.translator import ADAPTER_LOAD_PARAM, Translator, prompt_shape_fingerprint
+from perevod.translator import (
+    ADAPTER_LOAD_PARAM,
+    ReasoningLeakError,
+    TranslationError,
+    Translator,
+    TruncatedTranslationError,
+    prompt_shape_fingerprint,
+)
 
 __all__ = [
     "ADAPTER_ENV_VAR",
@@ -187,6 +194,7 @@ __all__ = [
     "PrepareError",
     "PrepareResult",
     "Progress",
+    "ReasoningLeakError",
     "RecordError",
     "RecordShapeError",
     "RunComparison",
@@ -200,7 +208,9 @@ __all__ = [
     "TrainerFailedError",
     "TrainingConfig",
     "TrainingError",
+    "TranslationError",
     "Translator",
+    "TruncatedTranslationError",
     "budget_chars_for",
     "build_argv",
     "build_training_record",
